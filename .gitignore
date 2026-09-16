@@ -170,13 +170,9 @@ cython_debug/
 
 # Virtual environments
 wsl_fyp/
-
-# Generated measurement tables and numerics data
-data/*
-!data/.gitkeep
+venv/
 
 # Generated artifacts
 generated_qasm/
 output_graphs/
 output_pbc/
-EOF
