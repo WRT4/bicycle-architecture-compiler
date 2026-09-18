@@ -115,15 +115,16 @@ def main():
 
             # Sequential multi-module baseline (q // 12)
             baseline_part = {q: (q // 12) for q in range(qc.num_qubits)}
-            deg_part, metis_part, kahypar_part = partition_and_save_graphs(
-                qc, name=adder_name, output_dir=str(GRAPHS_DIR)
+            deg_part, metis_part, kahypar_part, cluster_part = partition_and_save_graphs(
+                qc, name=adder_name, output_dir=str(GRAPHS_DIR), save=args.plot
             )
 
             schemes = {
                 "original": baseline_part,
                 "weighted_degree": deg_part,
                 "metis": metis_part,
-                "kahypar": kahypar_part
+                "kahypar": kahypar_part,
+                "clustering": cluster_part,
             }
 
             for scheme_name, part_map in schemes.items():
