@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 import sys
+import os
+import gc
+import argparse
 import subprocess
 import pandas as pd
 from pathlib import Path
-import gc
-import matplotlib.pyplot as plt
 
 # Add sibling QLDPC-Compilers repository
 repo_root = Path.home() / "QLDPC-Compilers"
@@ -23,118 +24,148 @@ from Compiler.frontend.graphs import (
 )
 from qiskit import qasm3
 
-# Directory layout
+# Default workspace paths
 WORKSPACE = Path.home() / "bicycle-architecture-compiler"
 SCRIPTS_DIR = WORKSPACE / "scripts"
-DATA_TABLE = WORKSPACE / "data" / "table_two-gross"
 COMPILER_BIN = WORKSPACE / "target" / "release" / "bicycle_compiler"
 NUMERICS_BIN = WORKSPACE / "target" / "release" / "bicycle_numerics"
-OUTPUT_CSV = WORKSPACE / "metrics.csv"
 
-# Target output folders
 QASM_DIR = WORKSPACE / "generated_qasm"
 GRAPHS_DIR = WORKSPACE / "output_graphs"
 PBC_DIR = WORKSPACE / "output_pbc"
 
-# Ensure all target folders exist
-for folder in [QASM_DIR, GRAPHS_DIR, PBC_DIR]:
-    folder.mkdir(parents=True, exist_ok=True)
+for d in [QASM_DIR, GRAPHS_DIR, PBC_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
 
-def run_pipeline(qasm_file: Path, num_qubits: int) -> dict:
-    """Executes compile_my_adder -> bicycle_compiler -> bicycle_numerics."""
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run automated benchmarking of QLDPC partitioned adders through IBM bicycle tools."
+    )
+    # Circuit selection
+    parser.add_argument("-n", "--bit-widths", type=int, nargs="+", default=[8],
+                        help="One or more adder bit-widths to benchmark (e.g. -n 8 16 32).")
+    parser.add_argument("--adders", type=str, nargs="+", 
+                        default=["sklansky", "brent_kung", "ladner_fischer", "kogge_stone", "han_carlson"],
+                        help="Adder families to benchmark.")
+
+    # bicycle_compiler options
+    parser.add_argument("--code", type=str, default="two-gross", choices=["gross", "two-gross"],
+                        help="Bicycle code architecture target.")
+    parser.add_argument("--measurement-table", type=Path, 
+                        default=WORKSPACE / "data" / "table_two-gross",
+                        help="Path to Clifford measurement synthesis table.")
+    parser.add_argument("-a", "--accuracy", type=float, default=1e-9,
+                        help="Accuracy of small-angle synthesis in bicycle_compiler.")
+
+    # bicycle_numerics options
+    parser.add_argument("--noise-model", type=str, default="two-gross_1e-4",
+                        help="Noise model identifier passed to bicycle_numerics (e.g. two-gross_1e-4).")
+
+    # Output file
+    parser.add_argument("-o", "--output", type=Path, default=WORKSPACE / "metrics.csv",
+                        help="Target CSV file for metrics output.")
+    
+    return parser.parse_args()
+
+def run_pipeline(qasm_file: Path, num_qubits: int, args) -> dict:
+    """Streams compile_my_adder -> bicycle_compiler -> bicycle_numerics with dynamic CLI args."""
     cmd = (
         f"python3 {SCRIPTS_DIR}/compile_my_adder.py {qasm_file} | "
-        f"{COMPILER_BIN} two-gross --measurement-table {DATA_TABLE} | "
-        f"{NUMERICS_BIN} {num_qubits} two-gross_1e-4"
+        f"{COMPILER_BIN} {args.code} --measurement-table {args.measurement_table} --accuracy {args.accuracy} | "
+        f"{NUMERICS_BIN} {num_qubits} {args.noise_model}"
     )
 
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"Error running pipeline for {qasm_file.name}:\n{result.stderr}", file=sys.stderr)
+        print(f"Pipeline error for {qasm_file.name}:\n{result.stderr}", file=sys.stderr)
         return None
 
-    # Parse final row from CSV output
-    lines = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+    lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
     if not lines:
         return None
     header = lines[0].split(",")
     final_row = lines[-1].split(",")
     return dict(zip(header, final_row))
 
-def main(n: int):
-    adders = {
-        f"sklansky_n{n}": n_bit_sklansky(n=n, en_c0=False, use_gidney=False),
-        f"brent_kung_n{n}": n_bit_brent_kung(n=n, en_c0=False, use_gidney=False),
-        f"ladner_fischer_n{n}": n_bit_ladner_fischer(n=n, en_c0=False, use_gidney=False),
-        f"kogge_stone_n{n}": n_bit_kogge_stone(n=n, en_c0=False, use_gidney=False),
-        f"han_carlson_n{n}": n_bit_han_carlson(n=n, en_c0=False, use_gidney=False)
+def get_adder_constructor(family: str):
+    lookup = {
+        "sklansky": n_bit_sklansky,
+        "brent_kung": n_bit_brent_kung,
+        "ladner_fischer": n_bit_ladner_fischer,
+        "kogge_stone": n_bit_kogge_stone,
+        "han_carlson": n_bit_han_carlson,
     }
+    return lookup.get(family)
 
+def main():
+    args = parse_args()
     all_results = []
 
-    for adder_name, qc in adders.items():
-        print(f"\n{'='*25} Processing {adder_name} {'='*25}")
+    for n_val in args.bit_widths:
+        for fam in args.adders:
+            constructor = get_adder_constructor(fam)
+            if not constructor:
+                print(f"Skipping unknown adder family: {fam}")
+                continue
 
-        # Save baseline unpartitioned circuit diagram
-        if qc.num_qubits <= 36:
-            save_circuit_diagram(qc, name=f"{adder_name}_00_original", output_dir=str(GRAPHS_DIR))
+            adder_name = f"{fam}_n{n_val}"
+            print(f"\n{'='*25} Processing {adder_name} {'='*25}")
+            qc = constructor(n=n_val, en_c0=False, use_gidney=False)
 
-        # Baseline partition: sequential mapping (0-11 to Mod 0, 12-23 to Mod 1 etc.)
-        baseline_part = {q: (q // 12) for q in range(qc.num_qubits)}
-        deg_part, metis_part, kahypar_part = partition_and_save_graphs(
-            qc, name=adder_name, output_dir=str(GRAPHS_DIR)
-        )
+            # Sequential multi-module baseline (q // 12)
+            baseline_part = {q: (q // 12) for q in range(qc.num_qubits)}
+            deg_part, metis_part, kahypar_part = partition_and_save_graphs(
+                qc, name=adder_name, output_dir=str(GRAPHS_DIR)
+            )
 
-        schemes = {
-            "original": baseline_part,
-            "weighted_degree": deg_part,
-            "metis": metis_part,
-            "kahypar": kahypar_part
-        }
+            schemes = {
+                "original": baseline_part,
+                "weighted_degree": deg_part,
+                "metis": metis_part,
+                "kahypar": kahypar_part
+            }
 
-        for scheme_name, part_map in schemes.items():
-            remapped_qc = remap_circuit_by_partition(qc, part_map)
-            qasm_path = QASM_DIR / f"{adder_name}_{scheme_name}.qasm"
+            for scheme_name, part_map in schemes.items():
+                remapped_qc = remap_circuit_by_partition(qc, part_map)
+                qasm_path = QASM_DIR / f"{adder_name}_{scheme_name}.qasm"
 
-            # 1. Export QASM to generated_qasm/
-            with open(qasm_path, "w") as f:
-                qasm3.dump(remapped_qc, f)
+                with open(qasm_path, "w") as f:
+                    qasm3.dump(remapped_qc, f)
 
-            # 2. Save remapped circuit diagram to output_graphs/
-            if qc.num_qubits <= 36:
-                save_circuit_diagram(remapped_qc, name=f"{adder_name}_{scheme_name}", output_dir=str(GRAPHS_DIR))
+                # Skip drawing circuit diagrams for high-depth circuits to prevent RAM exhaust
+                if qc.num_qubits <= 36 and len(qc.data) < 1000:
+                    save_circuit_diagram(remapped_qc, name=f"{adder_name}_{scheme_name}", output_dir=str(GRAPHS_DIR))
 
-            # 3. Stream through IBM compiler pipeline (PBC saved to output_pbc/)
-            metrics = run_pipeline(qasm_path, remapped_qc.num_qubits)
-            if metrics:
-                row = {
-                    "adder": adder_name,
-                    "partition": scheme_name,
-                    "allocated_qubits": remapped_qc.num_qubits,
-                    "pbc_steps": metrics.get("i"),
-                    "measurement_depth": metrics.get("measurement_depth"),
-                    "end_time": metrics.get("end_time"),
-                    "total_error": metrics.get("total_error"),
-                    "failure_prob": metrics.get("total_error"),
-                    "automorphisms": metrics.get("automorphisms"),
-                    "measurements": metrics.get("measurements")
-                }
-                all_results.append(row)
-                print(f"✓ [{scheme_name.upper():16}] Depth: {row['measurement_depth']:>3} | Cycles: {row['end_time']:>5} | Err: {row['total_error']}")
+                metrics = run_pipeline(qasm_path, remapped_qc.num_qubits, args)
+                if metrics:
+                    row = {
+                        "adder": adder_name,
+                        "partition": scheme_name,
+                        "allocated_qubits": remapped_qc.num_qubits,
+                        "code": args.code,
+                        "noise_model": args.noise_model,
+                        "pbc_steps": metrics.get("i"),
+                        "measurement_depth": metrics.get("measurement_depth"),
+                        "end_time": metrics.get("end_time"),
+                        "total_error": metrics.get("total_error"),
+                        "failure_prob": metrics.get("total_error"),
+                        "automorphisms": metrics.get("automorphisms"),
+                        "measurements": metrics.get("measurements")
+                    }
+                    all_results.append(row)
+                    print(f"✓ [{scheme_name.upper():16}] Depth: {row['measurement_depth']:>4} | Cycles: {row['end_time']:>7} | Err: {row['total_error']}")
 
-            plt.close('all')
+                del remapped_qc
+                gc.collect()
+
+            del qc
             gc.collect()
-        del qc
-        gc.collect()
 
-    # Save consolidated metrics
     df = pd.DataFrame(all_results)
-    df.to_csv(OUTPUT_CSV, index=False)
-    print(f"\n================ BENCHMARKING COMPLETE ================")
-    print(f"Metrics written to: {OUTPUT_CSV}")
-    print(f"QASM files saved in: {QASM_DIR}")
-    print(f"Circuit graphs saved in: {GRAPHS_DIR}")
-    print(f"PBC graphs saved in: {PBC_DIR}")
+    df.to_csv(args.output, index=False)
+    print(f"\nMetrics written to: {args.output}")
 
 if __name__ == "__main__":
-    main(32)
+    main()
+
+# python3 run_benchmarks.py -n 4 8 16 32 --noise-model two-gross_1e-3
