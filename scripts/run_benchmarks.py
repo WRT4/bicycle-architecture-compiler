@@ -47,6 +47,7 @@ def parse_args():
     parser.add_argument("--adders", type=str, nargs="+", 
                         default=["sklansky", "brent_kung", "ladner_fischer", "kogge_stone", "han_carlson"],
                         help="Adder families to benchmark.")
+    parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True, help="Save circuit diagrams as PNGs (use --no-plot to disable).")
 
     # bicycle_compiler options
     parser.add_argument("--code", type=str, default="two-gross", choices=["gross", "two-gross"],
@@ -133,8 +134,11 @@ def main():
                     qasm3.dump(remapped_qc, f)
 
                 # Skip drawing circuit diagrams for high-depth circuits to prevent RAM exhaust
-                if qc.num_qubits <= 36 and len(qc.data) < 1000:
-                    save_circuit_diagram(remapped_qc, name=f"{adder_name}_{scheme_name}", output_dir=str(GRAPHS_DIR))
+                if args.plot:
+                    if qc.num_qubits <= 36 and len(qc.data) < 1000:
+                        save_circuit_diagram(remapped_qc, name=f"{adder_name}_{scheme_name}", output_dir=str(GRAPHS_DIR))
+                    else:
+                        print(f"Skipping diagram for {adder_name} ({qc.num_qubits} qubits): circuit exceeds safe memory limits.")
 
                 metrics = run_pipeline(qasm_path, remapped_qc.num_qubits, args)
                 if metrics:
