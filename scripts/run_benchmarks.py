@@ -6,6 +6,8 @@ import argparse
 import subprocess
 import pandas as pd
 from pathlib import Path
+import math
+from qiskit import qasm3
 
 # Add sibling QLDPC-Compilers repository
 repo_root = Path.home() / "QLDPC-Compilers"
@@ -22,7 +24,7 @@ from Compiler.frontend.graphs import (
     remap_circuit_by_partition,
     save_circuit_diagram
 )
-from qiskit import qasm3
+from Compiler.frontend.modular_framework import ModularArchitecture, count_im_instructions
 
 # Default workspace paths
 WORKSPACE = Path.home() / "bicycle-architecture-compiler"
@@ -48,6 +50,7 @@ def parse_args():
                         default=["sklansky", "brent_kung", "ladner_fischer", "kogge_stone", "han_carlson"],
                         help="Adder families to benchmark.")
     parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True, help="Save circuit diagrams as PNGs (use --no-plot to disable).")
+    parser.add_argument("--gidney", action=argparse.BooleanOptionalAction, default=True, help="Use Gidney's Logical AND decomposition where possible (use --no-gidney to disable).")
 
     # bicycle_compiler options
     parser.add_argument("--code", type=str, default="two-gross", choices=["gross", "two-gross"],
@@ -61,9 +64,15 @@ def parse_args():
     # bicycle_numerics options
     parser.add_argument("--noise-model", type=str, default="two-gross_1e-4",
                         help="Noise model identifier passed to bicycle_numerics (e.g. two-gross_1e-4).")
+    parser.add_argument("--capacity", type=int, default=11, choices=[11, 12],
+                        help="Logical qubit capacity per module (11 data + 1 ancilla, or 12 full).")
+
+    # architecture options
+    parser.add_argument("--topology", type=str, default="chain", help="Module architecture (chain/all_to_all/grid_2d)", choices=["chain", "all_to_all", "grid_2d"])
+    parser.add_argument("--factory-period", type=int, default=2, help="How often modules have a distillation factory.")
 
     # Output file
-    parser.add_argument("-o", "--output", type=Path, default=WORKSPACE / "metrics.csv",
+    parser.add_argument("-o", "--output", type=Path, default=WORKSPACE / "saved_metrics" / "metrics.csv",
                         help="Target CSV file for metrics output.")
     
     return parser.parse_args()
@@ -111,12 +120,22 @@ def main():
 
             adder_name = f"{fam}_n{n_val}"
             print(f"\n{'='*25} Processing {adder_name} {'='*25}")
-            qc = constructor(n=n_val, en_c0=False, use_gidney=False)
+            qc = constructor(n=n_val, en_c0=False, use_gidney=args.gidney)
 
-            # Sequential multi-module baseline (q // 12)
-            baseline_part = {q: (q // 12) for q in range(qc.num_qubits)}
+            # Sequential multi-module baseline (q // 11)
+            baseline_part = {q: (q // args.capacity) for q in range(qc.num_qubits)}
             deg_part, metis_part, kahypar_part, cluster_part = partition_and_save_graphs(
                 qc, name=adder_name, output_dir=str(GRAPHS_DIR), save=args.plot
+            )
+
+            num_modules = max(2, math.ceil(qc.num_qubits / args.capacity))
+
+            # Instantiate the architecture framework (e.g. 1D Chain with factory every 2 modules)
+            arch = ModularArchitecture(
+                num_modules=num_modules,
+                module_capacity=args.capacity,
+                topology=args.topology,
+                factory_period=args.factory_period
             )
 
             schemes = {
@@ -128,9 +147,10 @@ def main():
             }
 
             for scheme_name, part_map in schemes.items():
-                remapped_qc = remap_circuit_by_partition(qc, part_map)
+                remapped_qc = remap_circuit_by_partition(qc, part_map, module_capacity=args.capacity)
                 qasm_path = QASM_DIR / f"{adder_name}_{scheme_name}.qasm"
-
+                arch.allocate_qubits(part_map)
+                im_metrics = count_im_instructions(qc, arch)
                 with open(qasm_path, "w") as f:
                     qasm3.dump(remapped_qc, f)
 
@@ -153,10 +173,14 @@ def main():
                         "measurement_depth": metrics.get("measurement_depth"),
                         "end_time": metrics.get("end_time"),
                         "total_error": metrics.get("total_error"),
-                        "failure_prob": metrics.get("total_error"),
                         "automorphisms": metrics.get("automorphisms"),
-                        "measurements": metrics.get("measurements")
+                        "measurements": metrics.get("measurements"),
                     }
+                    row["topology"] = args.topology
+                    row["im_gates"] = im_metrics["inter_module_gates"]
+                    row["im_hops"] = im_metrics["inter_module_hops"]
+                    row["factory_period"] = args.factory_period
+                    row["factory_im_hops"] = im_metrics["factory_delivery_hops"]
                     all_results.append(row)
                     print(f"✓ [{scheme_name.upper():16}] Depth: {row['measurement_depth']:>4} | Cycles: {row['end_time']:>7} | Err: {row['total_error']}")
 
@@ -167,8 +191,8 @@ def main():
             gc.collect()
 
     df = pd.DataFrame(all_results)
-    df.to_csv(args.output, index=False)
-    print(f"\nMetrics written to: {args.output}")
+    df.to_csv((WORKSPACE / "saved_metrics" / args.output), index=False)
+    print(f"\nMetrics written to: {(WORKSPACE / "saved_metrics" / args.output)}")
 
 if __name__ == "__main__":
     main()

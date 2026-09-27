@@ -5,6 +5,9 @@ data/
 .python-version
 .DS_STORE
 *.csv
+# Exception: allow CSV files inside saved_metrics
+!saved_metrics/*.csv
+!saved_metrics/**/*.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
