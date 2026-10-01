@@ -35,6 +35,7 @@ NUMERICS_BIN = WORKSPACE / "target" / "release" / "bicycle_numerics"
 QASM_DIR = WORKSPACE / "generated_qasm"
 GRAPHS_DIR = WORKSPACE / "output_graphs"
 PBC_DIR = WORKSPACE / "output_pbc"
+SAVED_METRICS_DIR = WORKSPACE / "saved_metrics"
 
 for d in [QASM_DIR, GRAPHS_DIR, PBC_DIR]:
     d.mkdir(parents=True, exist_ok=True)
@@ -49,7 +50,7 @@ def parse_args():
     parser.add_argument("--adders", type=str, nargs="+", 
                         default=["sklansky", "brent_kung", "ladner_fischer", "kogge_stone", "han_carlson"],
                         help="Adder families to benchmark.")
-    parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True, help="Save circuit diagrams as PNGs (use --no-plot to disable).")
+    parser.add_argument("--plot", action=argparse.BooleanOptionalAction, default=False, help="Save circuit diagrams as PNGs (use --plot to enable).")
     parser.add_argument("--gidney", action=argparse.BooleanOptionalAction, default=True, help="Use Gidney's Logical AND decomposition where possible (use --no-gidney to disable).")
 
     # bicycle_compiler options
@@ -72,7 +73,7 @@ def parse_args():
     parser.add_argument("--factory-period", type=int, default=2, help="How often modules have a distillation factory.")
 
     # Output file
-    parser.add_argument("-o", "--output", type=Path, default=WORKSPACE / "saved_metrics" / "metrics.csv",
+    parser.add_argument("-o", "--output", type=Path, default=SAVED_METRICS_DIR / "adders_metrics.csv",
                         help="Target CSV file for metrics output.")
     
     return parser.parse_args()
@@ -164,7 +165,7 @@ def main():
                 metrics = run_pipeline(qasm_path, remapped_qc.num_qubits, args)
                 if metrics:
                     row = {
-                        "adder": adder_name,
+                        "circuit": adder_name,
                         "partition": scheme_name,
                         "allocated_qubits": remapped_qc.num_qubits,
                         "code": args.code,
@@ -191,10 +192,10 @@ def main():
             gc.collect()
 
     df = pd.DataFrame(all_results)
-    df.to_csv((WORKSPACE / "saved_metrics" / args.output), index=False)
-    print(f"\nMetrics written to: {(WORKSPACE / "saved_metrics" / args.output)}")
+    df.to_csv((SAVED_METRICS_DIR / args.output), index=False)
+    print(f"\nMetrics written to: {(SAVED_METRICS_DIR / args.output)}")
 
 if __name__ == "__main__":
     main()
 
-# python3 run_benchmarks.py -n 4 8 16 32 --noise-model two-gross_1e-3
+# python3 run_adders_benchmarks.py -n 4 8 16 32 --noise-model two-gross_1e-3
