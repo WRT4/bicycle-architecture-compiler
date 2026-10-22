@@ -5,6 +5,8 @@ data/
 .python-version
 .DS_STORE
 *.csv
+old_metrics/
+old_notebooks
 # Exception: allow CSV files inside saved_metrics
 !saved_metrics/*.csv
 !saved_metrics/**/*.csv
